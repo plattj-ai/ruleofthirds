@@ -36,7 +36,7 @@ const LandingPage: React.FC<LandingPageProps> = ({ onStartPractice, onEnterTeach
   };
 
   return (
-    <div className="flex flex-col items-center justify-center min-h-screen p-4 w-full max-w-2xl mx-auto">
+    <div className="flex flex-col items-center p-4 pt-20 w-full max-w-2xl mx-auto">
       <h1 className="text-4xl font-bold text-slate-800 mb-8 text-center">
         Welcome to your Rule of Thirds Coach!
       </h1>
