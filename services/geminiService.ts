@@ -7,8 +7,8 @@ import { ImageBundleItem, FeedbackEmoji, GeminiServiceResult, GeminiFeedbackResp
  */
 class AIRequestQueue {
   private queue: Promise<any> = Promise.resolve();
-  private maxRetries = 3;
-  private baseDelay = 2000; // 2 seconds
+  private maxRetries = 5; // Increased retries for better success on free tier
+  private baseDelay = 3000; // Increased base delay to 3 seconds
 
   /**
    * Adds a task to the sequential queue with automatic retry logic.
@@ -21,11 +21,39 @@ class AIRequestQueue {
           return await task();
         } catch (error: any) {
           lastError = error;
-          const isRateLimit = error?.message?.includes('429') || error?.status === 429;
+          
+          // Check for 429 Rate Limit error in various places
+          const errorMsg = error?.message || '';
+          const isRateLimit = errorMsg.includes('429') || error?.status === 429 || errorMsg.includes('RESOURCE_EXHAUSTED');
           
           if (isRateLimit && attempt < this.maxRetries) {
-            const delay = this.baseDelay * Math.pow(2, attempt);
-            console.warn(`AI Rate limit hit. Retrying in ${delay}ms (Attempt ${attempt + 1}/${this.maxRetries})`);
+            let delay = this.baseDelay * Math.pow(2, attempt);
+
+            // Attempt to extract specific retry delay from the error message if provided by Google
+            try {
+              // The error message often contains a JSON string
+              const jsonStart = errorMsg.indexOf('{');
+              if (jsonStart !== -1) {
+                const jsonStr = errorMsg.substring(jsonStart);
+                const parsedError = JSON.parse(jsonStr);
+                
+                // Look for retryDelay in the error details (format: "28.345s")
+                const retryInfo = parsedError?.error?.details?.find((d: any) => d.retryDelay || d['@type']?.includes('RetryInfo'));
+                const specificDelayStr = retryInfo?.retryDelay;
+                
+                if (specificDelayStr && typeof specificDelayStr === 'string') {
+                  const seconds = parseFloat(specificDelayStr.replace('s', ''));
+                  if (!isNaN(seconds)) {
+                    // Add 1 second buffer to be safe
+                    delay = (seconds + 1) * 1000;
+                  }
+                }
+              }
+            } catch (e) {
+              // If parsing fails, fall back to exponential backoff
+            }
+
+            console.warn(`AI is busy. Retrying in ${Math.round(delay/1000)}s... (Attempt ${attempt + 1}/${this.maxRetries})`);
             await new Promise(resolve => setTimeout(resolve, delay));
             continue;
           }
@@ -35,9 +63,9 @@ class AIRequestQueue {
       throw lastError;
     };
 
-    // Chain the task to the existing queue
+    // Chain the task to the existing queue to ensure sequential processing
     const resultPromise = this.queue.then(() => queuedTask());
-    // Update the queue head to always be the most recent promise (even if it fails)
+    // Update the queue head so the next request waits for this one (regardless of success/fail)
     this.queue = resultPromise.catch(() => {});
     return resultPromise;
   }
@@ -50,7 +78,7 @@ const aiQueue = new AIRequestQueue();
  */
 const getGeminiClient = () => {
   if (!process.env.API_KEY) {
-    throw new Error('API_KEY is not defined in environment variables.');
+    throw new Error('API_KEY is not defined. Please ensure the environment is configured correctly.');
   }
   return new GoogleGenAI({ apiKey: process.env.API_KEY });
 };
@@ -121,21 +149,34 @@ export const getGeminiFeedback = async (
             propertyOrdering: ['feedback', 'emoji', 'tip'],
           },
           temperature: 0.7,
-          maxOutputTokens: 300,
+          maxOutputTokens: 400,
           thinkingConfig: { thinkingBudget: 50 },
         },
       });
 
       let jsonStr = response.text.trim();
-      if (jsonStr.startsWith('```json')) jsonStr = jsonStr.substring(7);
-      if (jsonStr.endsWith('```')) jsonStr = jsonStr.substring(0, jsonStr.length - 3);
+      // Clean up potential markdown code blocks
+      if (jsonStr.startsWith('```')) {
+        jsonStr = jsonStr.replace(/^```json\n?/, '').replace(/```$/, '');
+      }
 
       const parsedResponse = JSON.parse(jsonStr) as GeminiFeedbackResponse;
-      return { feedback: parsedResponse.feedback, emoji: parsedResponse.emoji, tip: parsedResponse.tip };
+      return { 
+        feedback: parsedResponse.feedback, 
+        emoji: parsedResponse.emoji, 
+        tip: parsedResponse.tip 
+      };
 
     } catch (apiError: any) {
       console.error('Gemini API call failed:', apiError);
-      return { error: `Failed to get feedback from AI: ${apiError?.message || 'Unknown error'}` };
+      // Clean up the error message for the student UI
+      let displayError = "The AI is a bit busy right now.";
+      if (apiError?.message?.includes('429') || apiError?.message?.includes('quota')) {
+        displayError = "We've reached the AI's daily limit for now. Please try again in a little while!";
+      } else if (apiError?.message) {
+        displayError = "Oops! Something went wrong while getting feedback. Let's try again.";
+      }
+      return { error: displayError };
     }
   });
 };
@@ -163,7 +204,7 @@ export const getGeminiOverallSummary = async (
 
     Based on this, provide a concise overall summary of their work (3-4 sentences).
     IMPORTANT: Use vocabulary that a 6th grader (11-12 years old) will understand and feel proud of. 
-    Explain their progress in terms of "becoming a better visual storyteller" or "growing their design eye."
+    Explain their progress in terms of "becoming a better visual storyteller" or "growing your design eye."
     
     Then, choose an overall emoji:
     - 'excellent' (🌟): Consistent strong understanding.
@@ -193,21 +234,22 @@ export const getGeminiOverallSummary = async (
             propertyOrdering: ['summary', 'overallEmoji'],
           },
           temperature: 0.7,
-          maxOutputTokens: 300,
+          maxOutputTokens: 400,
           thinkingConfig: { thinkingBudget: 50 },
         },
       });
 
       let jsonStr = response.text.trim();
-      if (jsonStr.startsWith('```json')) jsonStr = jsonStr.substring(7);
-      if (jsonStr.endsWith('```')) jsonStr = jsonStr.substring(0, jsonStr.length - 3);
+      if (jsonStr.startsWith('```')) {
+        jsonStr = jsonStr.replace(/^```json\n?/, '').replace(/```$/, '');
+      }
 
       const parsedResponse = JSON.parse(jsonStr) as GeminiOverallSummaryResponse;
       return { summary: parsedResponse.summary, overallEmoji: parsedResponse.overallEmoji };
 
     } catch (apiError: any) {
       console.error('Gemini API call for overall summary failed:', apiError);
-      return { error: `Failed to get overall summary from AI: ${apiError?.message || 'Unknown error'}` };
+      return { error: "I couldn't put your summary together just yet. The AI is taking a quick break!" };
     }
   });
 };
