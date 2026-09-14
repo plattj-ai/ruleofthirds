@@ -11,9 +11,15 @@ export const GRID_COLOR_MAP: Record<GridColor, { line: string; dot: string; dotI
   [GridColor.PURPLE]: { line: 'stroke-fuchsia-700', dot: 'fill-slate-800', dotInverse: GridColor.YELLOW }, // Placeholder for dot inverse, if needed
 };
 
-export const OBSERVATION_PROMPT = `Make 3-5 observations about how the grid was used to organize the image.
-Tell me about where things are placed on the grid, like on lines or in specific spaces.
-Notice what is in each row or column and in individual boxes.`;
+export const OBSERVATION_PROMPT = `Take a close look at how the 3×3 grid divides the photo! Share 3 to 5 quick observations about where objects and spaces are placed on the grid.`;
+
+export const OBSERVATION_CLUES = [
+  "What is lined up along the vertical (up-and-down) or horizontal (side-to-side) lines?",
+  "What lands right on the dots where lines cross (the sweet spots)?",
+  "What fills the top, middle, or bottom rows?",
+  "What fills the left, middle, or right columns?",
+  "Where is the main subject located, and where is the open 'breathing room'?",
+];
 
 export const NON_ANSWER_KEYWORDS = [
   'idk', 'no', 'nope', 'idc', 'nah', 'dunno', 'n/a', 'nothing', 'skip', 'zero', 'none',

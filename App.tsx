@@ -12,13 +12,46 @@ const App: React.FC = () => {
   const [lessonBundle, setLessonBundle] = useState<LessonBundle | null>(null);
   const [selectedImages, setSelectedImages] = useState<ImageBundleItem[]>([]);
   const [currentImageIndex, setCurrentImageIndex] = useState<number>(0);
+  const [isFreePlay, setIsFreePlay] = useState<boolean>(false);
   const [studentObservations, setStudentObservations] = useState<
     { image: ImageBundleItem; observations: string[]; feedback: string | null; tip?: string; emoji: FeedbackEmoji | null }[]
   >([]);
 
   const handleStartPractice = (bundle: LessonBundle) => {
+    setIsFreePlay(false);
     setLessonBundle(bundle);
     setAppState(AppState.PAGE_IMAGE_GALLERY);
+  };
+
+  const handleStartFreePlay = (image: ImageBundleItem) => {
+    setIsFreePlay(true);
+    setLessonBundle(null);
+    setSelectedImages([image]);
+    setCurrentImageIndex(0);
+    setStudentObservations([
+      {
+        image,
+        observations: [],
+        feedback: null,
+        tip: undefined,
+        emoji: null,
+      },
+    ]);
+    setAppState(AppState.PAGE_COACHING);
+  };
+
+  const handleUploadAnotherFreePlayImage = (image: ImageBundleItem) => {
+    setSelectedImages([image]);
+    setCurrentImageIndex(0);
+    setStudentObservations([
+      {
+        image,
+        observations: [],
+        feedback: null,
+        tip: undefined,
+        emoji: null,
+      },
+    ]);
   };
 
   const handleTeacherModeExit = () => {
@@ -26,6 +59,7 @@ const App: React.FC = () => {
   };
 
   const handleSelectImagesForCoaching = (images: ImageBundleItem[]) => {
+    setIsFreePlay(false);
     setSelectedImages(images);
     setStudentObservations(
       images.map((image) => ({
@@ -64,6 +98,7 @@ const App: React.FC = () => {
 
   const resetApp = () => {
     setAppState(AppState.PAGE_LANDING);
+    setIsFreePlay(false);
     setLessonBundle(null);
     setSelectedImages([]);
     setCurrentImageIndex(0);
@@ -87,6 +122,7 @@ const App: React.FC = () => {
         <LandingPage
           onStartPractice={handleStartPractice}
           onEnterTeacherMode={() => setAppState(AppState.PAGE_TEACHER_MODE)}
+          onStartFreePlay={handleStartFreePlay}
         />
       )}
 
@@ -110,6 +146,9 @@ const App: React.FC = () => {
           onNextImage={handleNextImage}
           onSaveObservationsAndFeedback={handleSaveObservationsAndFeedback}
           observationsData={studentObservations[currentImageIndex]}
+          isFreePlay={isFreePlay}
+          onUploadAnotherFreePlayImage={handleUploadAnotherFreePlayImage}
+          onExitPractice={resetApp}
         />
       )}
 

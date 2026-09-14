@@ -1,8 +1,9 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { ImageBundleItem, GridColor, StudentObservationData, FeedbackEmoji, GeminiServiceResult, UIIcon } from '../types';
 import Button from './Button';
-import { GRID_COLOR_MAP, OBSERVATION_PROMPT, NON_ANSWER_KEYWORDS, FEEDBACK_EMOJI_COMPONENTS, UI_ICON_COMPONENTS } from '../constants';
-import { getGeminiFeedback } from '../services/geminiService'; // Assuming this service exists
+import { GRID_COLOR_MAP, OBSERVATION_PROMPT, OBSERVATION_CLUES, NON_ANSWER_KEYWORDS, FEEDBACK_EMOJI_COMPONENTS, UI_ICON_COMPONENTS } from '../constants';
+import { getGeminiFeedback } from '../services/geminiService';
+import { fileToBase64 } from '../utils/imageUtils';
 
 interface CoachingPageProps {
   image: ImageBundleItem;
@@ -11,6 +12,9 @@ interface CoachingPageProps {
   onNextImage: () => void;
   onSaveObservationsAndFeedback: (index: number, observations: string[], feedback: string, tip: string | undefined, emoji: FeedbackEmoji) => void;
   observationsData: StudentObservationData;
+  isFreePlay?: boolean;
+  onUploadAnotherFreePlayImage?: (image: ImageBundleItem) => void;
+  onExitPractice?: () => void;
 }
 
 const CoachingPage: React.FC<CoachingPageProps> = ({
@@ -20,16 +24,44 @@ const CoachingPage: React.FC<CoachingPageProps> = ({
   onNextImage,
   onSaveObservationsAndFeedback,
   observationsData,
+  isFreePlay = false,
+  onUploadAnotherFreePlayImage,
+  onExitPractice,
 }) => {
   const [gridColor, setGridColor] = useState<GridColor>(GridColor.WHITE);
   const [showGrid, setShowGrid] = useState<boolean>(true); // New state for toggling grid visibility
   const [observations, setObservations] = useState<string[]>(observationsData.observations.concat(Array(5 - observationsData.observations.length).fill('')));
   const [isFeedbackLoading, setIsFeedbackLoading] = useState<boolean>(false);
   const [feedbackResult, setFeedbackResult] = useState<GeminiServiceResult | null>(null); // Stores the full GeminiServiceResult
+  const [apiErrorMessage, setApiErrorMessage] = useState<string | null>(null);
   const [showNonAnswerWarning, setShowNonAnswerWarning] = useState<boolean>(false); // New state for non-answer warning
+  const [showCluesModal, setShowCluesModal] = useState<boolean>(false); // Pop-up for clues/help
 
   const imageRef = useRef<HTMLImageElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const freePlayInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFreePlayChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file && file.type.startsWith('image/')) {
+      try {
+        const base64 = await fileToBase64(file);
+        setObservations(['', '', '', '', '']);
+        setFeedbackResult(null);
+        setApiErrorMessage(null);
+        setShowNonAnswerWarning(false);
+        onUploadAnotherFreePlayImage?.({
+          base64,
+          name: file.name || 'Uploaded Photo',
+        });
+      } catch (err) {
+        console.error('Error loading image in free play:', err);
+      }
+    }
+    if (freePlayInputRef.current) {
+      freePlayInputRef.current.value = '';
+    }
+  };
 
   // Reset observations and feedback when image changes
   useEffect(() => {
@@ -44,6 +76,7 @@ const CoachingPage: React.FC<CoachingPageProps> = ({
     } else {
       setFeedbackResult(null);
     }
+    setApiErrorMessage(null);
     setShowNonAnswerWarning(false); // Reset warning on image change
   }, [image, observationsData]);
 
@@ -199,6 +232,7 @@ const CoachingPage: React.FC<CoachingPageProps> = ({
       return newObs;
     });
     setShowNonAnswerWarning(false); // Hide warning if student starts typing again
+    setApiErrorMessage(null);
   };
 
   const isExactNonAnswer = (obs: string) => {
@@ -236,18 +270,16 @@ const CoachingPage: React.FC<CoachingPageProps> = ({
 
     setIsFeedbackLoading(true);
     setFeedbackResult(null); // Clear previous feedback
+    setApiErrorMessage(null);
 
     try {
       const result = await getGeminiFeedback(image, initiallyValidObservations);
 
       if (result.error) {
-        setFeedbackResult({
-          feedback: result.error,
-          emoji: FeedbackEmoji.POOR, // Indicate an error state visually with POOR emoji
-          tip: undefined
-        });
+        setApiErrorMessage(result.error);
       } else if (result.feedback && result.emoji) {
         setFeedbackResult(result);
+        setApiErrorMessage(null);
         onSaveObservationsAndFeedback(
           currentImageIndex,
           initiallyValidObservations, // Pass the filtered, valid observations
@@ -256,22 +288,11 @@ const CoachingPage: React.FC<CoachingPageProps> = ({
           result.emoji // Pass emoji to parent
         );
       } else {
-        // Fallback for unexpected cases where result is neither error nor full feedback
-        setFeedbackResult({
-          feedback: "An unexpected issue occurred while processing AI feedback. Please try again.",
-          emoji: FeedbackEmoji.POOR, // Indicate an error state visually with POOR emoji
-          tip: undefined
-        });
+        setApiErrorMessage("The AI could not generate feedback right now. Please click Submit to try again.");
       }
     } catch (error) {
-      // This catch block would primarily handle synchronous errors or re-thrown errors
       console.error('Unexpected error during feedback submission:', error);
-      setFeedbackResult({
-        feedback: "An unexpected error occurred. Please try again later. " +
-          `(Error: ${error instanceof Error ? error.message : String(error)})`,
-        emoji: FeedbackEmoji.POOR, // Indicate an error state visually with POOR emoji
-        tip: undefined
-      });
+      setApiErrorMessage("Could not connect to the AI service. Please check your connection and try again.");
     } finally {
       setIsFeedbackLoading(false);
     }
@@ -291,22 +312,40 @@ const CoachingPage: React.FC<CoachingPageProps> = ({
     }
   }
 
-  const observationPlaceholders = [
-    "E.g., The main subject is on the left vertical line...",
-    "E.g., The horizon line matches the lower horizontal third...",
-    "E.g., Key elements are placed near the intersection points...",
-    "E.g., The top third contains X, the middle third contains Y...",
-    "E.g., The left column has more empty space, balancing the right...",
-  ];
-
-
   return (
     <div className="flex flex-col lg:flex-row gap-8 max-w-6xl mx-auto my-8 w-full">
       {/* Left Side: Image and Grid Controls */}
       <div className="lg:w-1/2 p-6 bg-white shadow-xl rounded-lg flex flex-col items-center">
-        <h3 className="text-xl font-semibold text-slate-700 mb-4">
-          Image {currentImageIndex + 1} of {totalImages}
-        </h3>
+        {isFreePlay ? (
+          <div className="w-full flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2 overflow-hidden">
+              <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-300 flex-shrink-0">
+                Free Play
+              </span>
+              <span className="text-sm font-semibold text-slate-700 truncate" title={image.name}>
+                {image.name}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => freePlayInputRef.current?.click()}
+              className="text-xs font-medium text-emerald-700 hover:text-emerald-900 bg-emerald-50 hover:bg-emerald-100 px-3 py-1.5 rounded-lg border border-emerald-200 transition-colors cursor-pointer flex-shrink-0 ml-2"
+            >
+              Upload Different Photo
+            </button>
+            <input
+              type="file"
+              ref={freePlayInputRef}
+              onChange={handleFreePlayChange}
+              accept="image/jpeg,image/png,image/webp,image/gif"
+              className="hidden"
+            />
+          </div>
+        ) : (
+          <h3 className="text-xl font-semibold text-slate-700 mb-4">
+            Image {currentImageIndex + 1} of {totalImages}
+          </h3>
+        )}
         <div className="relative w-full aspect-square max-w-lg mb-4 bg-slate-100 border border-slate-200 rounded-lg overflow-hidden">
           <img
             ref={imageRef}
@@ -413,12 +452,31 @@ const CoachingPage: React.FC<CoachingPageProps> = ({
               </div>
             )}
 
-            <Button
-              onClick={onNextImage}
-              className="mt-6 w-full sm:w-auto px-6 py-3 self-end"
-            >
-              {currentImageIndex < totalImages - 1 ? 'Next Image →' : 'Finish Practice!'}
-            </Button>
+            {isFreePlay ? (
+              <div className="mt-6 flex flex-col sm:flex-row gap-3 justify-end items-center w-full">
+                <Button
+                  variant="secondary"
+                  onClick={onExitPractice}
+                  className="w-full sm:w-auto px-5 py-2.5 text-sm order-2 sm:order-1"
+                >
+                  ← Back to Home
+                </Button>
+                <Button
+                  onClick={() => freePlayInputRef.current?.click()}
+                  className="w-full sm:w-auto px-6 py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-medium order-1 sm:order-2 flex items-center justify-center gap-2"
+                >
+                  <span>📸</span>
+                  <span>Analyze Another Photo</span>
+                </Button>
+              </div>
+            ) : (
+              <Button
+                onClick={onNextImage}
+                className="mt-6 w-full sm:w-auto px-6 py-3 self-end"
+              >
+                {currentImageIndex < totalImages - 1 ? 'Next Image →' : 'Finish Practice!'}
+              </Button>
+            )}
           </div>
         ) : (
           // Observations Input Section
@@ -427,21 +485,33 @@ const CoachingPage: React.FC<CoachingPageProps> = ({
               {ObservationIconComponent && <ObservationIconComponent className="w-7 h-7 mr-2" />}
               Your Observations
             </h3>
-            <p className="text-slate-600 mb-6 leading-relaxed whitespace-pre-wrap">
-              {OBSERVATION_PROMPT}
-            </p>
+            <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3 mb-4">
+              <p className="text-slate-600 leading-relaxed flex-grow">
+                {OBSERVATION_PROMPT}
+              </p>
+              <button
+                type="button"
+                onClick={() => setShowCluesModal(true)}
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 text-sm font-semibold transition-colors cursor-pointer shadow-xs self-start flex-shrink-0"
+                title="Click for clues to help you observe"
+              >
+                <span>💡</span>
+                <span>Clues to look for</span>
+              </button>
+            </div>
 
-            <div className="mb-6 space-y-3 flex-grow">
+            <div className="mb-4 space-y-3 flex-grow">
               {observations.map((obs, index) => (
                 <div key={index} className="flex items-center">
-                  <span className="text-slate-700 font-medium mr-3">{index + 1}.</span>
+                  <span className="text-slate-700 font-medium mr-3 w-4 text-right">{index + 1}.</span>
                   <input
                     type="text"
                     value={obs}
                     onChange={(e) => handleObservationChange(index, e.target.value)}
-                    placeholder={observationPlaceholders[index] || `Observation ${index + 1}`}
-                    className="flex-grow p-2 border border-slate-700 rounded-md focus:ring-2 focus:ring-purple-400 focus:border-transparent text-white bg-slate-800 placeholder-slate-400"
+                    placeholder=""
+                    className="flex-grow p-2.5 border border-slate-700 rounded-md focus:ring-2 focus:ring-purple-400 focus:border-transparent text-white bg-slate-800 text-sm"
                     disabled={isFeedbackLoading}
+                    aria-label={`Observation ${index + 1}`}
                   />
                 </div>
               ))}
@@ -456,13 +526,37 @@ const CoachingPage: React.FC<CoachingPageProps> = ({
               </div>
             )}
 
-            <Button
-              onClick={handleSubmitObservations}
-              disabled={getValidObservations().length < 3 || isFeedbackLoading}
-              className="w-full sm:w-auto px-6 py-3 self-end"
-            >
-              {isFeedbackLoading ? 'Processing...' : 'Submit Observations →'}
-            </Button>
+            {apiErrorMessage && (
+              <div className="p-3 mb-4 text-amber-900 bg-amber-50 border border-amber-300 rounded-md text-sm flex items-start gap-2">
+                <span className="text-lg flex-shrink-0">⚠️</span>
+                <div className="flex-grow">
+                  <p className="font-semibold">{apiErrorMessage}</p>
+                  <p className="text-xs text-amber-700 mt-0.5">Your observations were kept! Click "Submit Observations" to try again.</p>
+                </div>
+              </div>
+            )}
+
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-3 mt-2">
+              <span className="text-sm">
+                {getValidObservations().length >= 3 ? (
+                  <span className="text-emerald-700 font-medium flex items-center">
+                    ✓ Ready to submit ({getValidObservations().length} of 3 required observations completed)
+                  </span>
+                ) : (
+                  <span className="text-slate-500">
+                    Write at least {3 - getValidObservations().length} more observation{3 - getValidObservations().length === 1 ? '' : 's'} to submit (minimum 3).
+                  </span>
+                )}
+              </span>
+
+              <Button
+                onClick={handleSubmitObservations}
+                disabled={getValidObservations().length < 3 || isFeedbackLoading}
+                className="w-full sm:w-auto px-6 py-3 self-end"
+              >
+                {isFeedbackLoading ? 'Processing...' : 'Submit Observations →'}
+              </Button>
+            </div>
 
             {isFeedbackLoading && (
               <div className="flex items-center justify-center p-4 bg-slate-100 rounded-md text-slate-700 text-lg mt-4 text-center">
@@ -479,6 +573,60 @@ const CoachingPage: React.FC<CoachingPageProps> = ({
           </div>
         )}
       </div>
+
+      {/* Clues To Look For Pop-up Modal */}
+      {showCluesModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs"
+          onClick={() => setShowCluesModal(false)}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="clues-modal-title"
+        >
+          <div
+            className="bg-white rounded-2xl shadow-2xl max-w-lg w-full p-6 border border-slate-200 relative animate-in fade-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              onClick={() => setShowCluesModal(false)}
+              className="absolute top-4 right-4 text-slate-400 hover:text-slate-600 p-1.5 rounded-lg hover:bg-slate-100 transition-colors text-lg leading-none cursor-pointer"
+              aria-label="Close clues"
+            >
+              ✕
+            </button>
+
+            <div className="flex items-center gap-2.5 text-purple-800 mb-2">
+              <span className="text-2xl leading-none">💡</span>
+              <h4 id="clues-modal-title" className="text-xl font-bold text-slate-800">
+                Clues to Look For
+              </h4>
+            </div>
+
+            <p className="text-sm text-slate-600 mb-4">
+              Need help making observations? Ask yourself these questions while looking at the image and the grid lines:
+            </p>
+
+            <ul className="space-y-3 text-sm text-slate-700 mb-6 bg-purple-50/70 p-4 rounded-xl border border-purple-100">
+              {OBSERVATION_CLUES.map((clue, idx) => (
+                <li key={idx} className="flex items-start gap-2.5">
+                  <span className="text-purple-600 font-bold mt-0.5">•</span>
+                  <span className="leading-snug">{clue}</span>
+                </li>
+              ))}
+            </ul>
+
+            <div className="flex justify-end">
+              <Button
+                onClick={() => setShowCluesModal(false)}
+                className="px-5 py-2.5 text-sm"
+              >
+                Got it, thanks!
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -7,11 +7,11 @@ import { ImageBundleItem, FeedbackEmoji, GeminiServiceResult, GeminiFeedbackResp
  */
 class AIRequestQueue {
   private queue: Promise<any> = Promise.resolve();
-  private maxRetries = 5; // Increased retries for better success on free tier
-  private baseDelay = 3000; // Increased base delay to 3 seconds
+  private maxRetries = 4;
+  private baseDelay = 2000;
 
   /**
-   * Adds a task to the sequential queue with automatic retry logic.
+   * Adds a task to the sequential queue with automatic retry logic for rate limits and temporary spikes.
    */
   async enqueue<T>(task: () => Promise<T>): Promise<T> {
     const queuedTask = async (): Promise<T> => {
@@ -22,38 +22,42 @@ class AIRequestQueue {
         } catch (error: any) {
           lastError = error;
           
-          // Check for 429 Rate Limit error in various places
-          const errorMsg = error?.message || '';
-          const isRateLimit = errorMsg.includes('429') || error?.status === 429 || errorMsg.includes('RESOURCE_EXHAUSTED');
+          const errorMsg = error?.message || String(error || '');
+          const status = error?.status;
+          const isTransient =
+            errorMsg.includes('429') ||
+            status === 429 ||
+            errorMsg.includes('RESOURCE_EXHAUSTED') ||
+            errorMsg.includes('503') ||
+            status === 503 ||
+            errorMsg.includes('UNAVAILABLE') ||
+            errorMsg.includes('high demand') ||
+            errorMsg.includes('overloaded');
           
-          if (isRateLimit && attempt < this.maxRetries) {
+          if (isTransient && attempt < this.maxRetries) {
             let delay = this.baseDelay * Math.pow(2, attempt);
 
-            // Attempt to extract specific retry delay from the error message if provided by Google
             try {
-              // The error message often contains a JSON string
               const jsonStart = errorMsg.indexOf('{');
               if (jsonStart !== -1) {
                 const jsonStr = errorMsg.substring(jsonStart);
                 const parsedError = JSON.parse(jsonStr);
-                
-                // Look for retryDelay in the error details (format: "28.345s")
-                const retryInfo = parsedError?.error?.details?.find((d: any) => d.retryDelay || d['@type']?.includes('RetryInfo'));
+                const retryInfo = parsedError?.error?.details?.find(
+                  (d: any) => d.retryDelay || d['@type']?.includes('RetryInfo')
+                );
                 const specificDelayStr = retryInfo?.retryDelay;
-                
                 if (specificDelayStr && typeof specificDelayStr === 'string') {
                   const seconds = parseFloat(specificDelayStr.replace('s', ''));
                   if (!isNaN(seconds)) {
-                    // Add 1 second buffer to be safe
                     delay = (seconds + 1) * 1000;
                   }
                 }
               }
             } catch (e) {
-              // If parsing fails, fall back to exponential backoff
+              // ignore parse errors
             }
 
-            console.warn(`AI is busy. Retrying in ${Math.round(delay/1000)}s... (Attempt ${attempt + 1}/${this.maxRetries})`);
+            console.warn(`AI is temporarily busy (status ${status}). Retrying in ${Math.round(delay / 1000)}s... (Attempt ${attempt + 1}/${this.maxRetries})`);
             await new Promise(resolve => setTimeout(resolve, delay));
             continue;
           }
@@ -63,9 +67,7 @@ class AIRequestQueue {
       throw lastError;
     };
 
-    // Chain the task to the existing queue to ensure sequential processing
     const resultPromise = this.queue.then(() => queuedTask());
-    // Update the queue head so the next request waits for this one (regardless of success/fail)
     this.queue = resultPromise.catch(() => {});
     return resultPromise;
   }
@@ -77,10 +79,11 @@ const aiQueue = new AIRequestQueue();
  * Initializes the GoogleGenAI client with the API key from environment variables.
  */
 const getGeminiClient = () => {
-  if (!process.env.API_KEY) {
-    throw new Error('API_KEY is not defined. Please ensure the environment is configured correctly.');
+  const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error('GEMINI_API_KEY is not defined. Please ensure the environment is configured correctly.');
   }
-  return new GoogleGenAI({ apiKey: process.env.API_KEY });
+  return new GoogleGenAI({ apiKey });
 };
 
 export const getGeminiFeedback = async (
@@ -126,38 +129,61 @@ export const getGeminiFeedback = async (
     }
     `;
 
+      // Extract mimeType from data URL if present, defaulting to image/jpeg
+      const mimeMatch = image.base64.match(/^data:([a-zA-Z0-9]+\/[a-zA-Z0-9-.+]+);base64,/);
+      const mimeType = mimeMatch ? mimeMatch[1] : 'image/jpeg';
+      const base64Data = image.base64.includes(',') ? image.base64.split(',')[1] : image.base64;
+
       const imagePart = {
         inlineData: {
-          mimeType: 'image/jpeg',
-          data: image.base64.split(',')[1],
+          mimeType,
+          data: base64Data,
         },
       };
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
-        contents: { parts: [imagePart, { text: prompt }] },
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              feedback: { type: Type.STRING },
-              emoji: { type: Type.STRING, enum: ['excellent', 'good', 'ponder', 'poor'] },
-              tip: { type: Type.STRING },
-            },
-            required: ['feedback', 'emoji'],
-            propertyOrdering: ['feedback', 'emoji', 'tip'],
+      const requestConfig = {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            feedback: { type: Type.STRING },
+            emoji: { type: Type.STRING, enum: ['excellent', 'good', 'ponder', 'poor'] },
+            tip: { type: Type.STRING },
           },
-          temperature: 0.7,
-          maxOutputTokens: 400,
-          thinkingConfig: { thinkingBudget: 50 },
+          required: ['feedback', 'emoji'],
+          propertyOrdering: ['feedback', 'emoji', 'tip'],
         },
-      });
+        temperature: 0.7,
+        maxOutputTokens: 800,
+      };
 
-      let jsonStr = response.text.trim();
-      // Clean up potential markdown code blocks
+      let response;
+      const modelsToTry = ['gemini-flash-lite-latest', 'gemini-3.8-flash', 'gemini-3.6-flash'];
+      let lastCallError: any;
+
+      for (const modelName of modelsToTry) {
+        try {
+          response = await ai.models.generateContent({
+            model: modelName,
+            contents: [imagePart, prompt],
+            config: requestConfig,
+          });
+          if (response?.text) {
+            break;
+          }
+        } catch (err: any) {
+          lastCallError = err;
+          console.warn(`Model ${modelName} call failed, trying next fallback:`, err?.message || err);
+        }
+      }
+
+      if (!response?.text) {
+        throw lastCallError || new Error("No response generated by the AI");
+      }
+
+      let jsonStr = response.text ? response.text.trim() : '';
       if (jsonStr.startsWith('```')) {
-        jsonStr = jsonStr.replace(/^```json\n?/, '').replace(/```$/, '');
+        jsonStr = jsonStr.replace(/^```json\n?/, '').replace(/```$/, '').trim();
       }
 
       const parsedResponse = JSON.parse(jsonStr) as GeminiFeedbackResponse;
@@ -169,12 +195,9 @@ export const getGeminiFeedback = async (
 
     } catch (apiError: any) {
       console.error('Gemini API call failed:', apiError);
-      // Clean up the error message for the student UI
-      let displayError = "The AI is a bit busy right now.";
+      let displayError = "The AI is a bit busy right now. Please try submitting again in a moment!";
       if (apiError?.message?.includes('429') || apiError?.message?.includes('quota')) {
-        displayError = "We've reached the AI's daily limit for now. Please try again in a little while!";
-      } else if (apiError?.message) {
-        displayError = "Oops! Something went wrong while getting feedback. Let's try again.";
+        displayError = "We've reached the AI request limit for now. Please wait a moment and try again.";
       }
       return { error: displayError };
     }
@@ -219,29 +242,48 @@ export const getGeminiOverallSummary = async (
     }
     `;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
-        contents: [{ text: prompt }],
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              summary: { type: Type.STRING },
-              overallEmoji: { type: Type.STRING, enum: ['excellent', 'good', 'ponder', 'poor'] },
-            },
-            required: ['summary', 'overallEmoji'],
-            propertyOrdering: ['summary', 'overallEmoji'],
+      const summaryConfig = {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            summary: { type: Type.STRING },
+            overallEmoji: { type: Type.STRING, enum: ['excellent', 'good', 'ponder', 'poor'] },
           },
-          temperature: 0.7,
-          maxOutputTokens: 400,
-          thinkingConfig: { thinkingBudget: 50 },
+          required: ['summary', 'overallEmoji'],
+          propertyOrdering: ['summary', 'overallEmoji'],
         },
-      });
+        temperature: 0.7,
+        maxOutputTokens: 800,
+      };
 
-      let jsonStr = response.text.trim();
+      let response;
+      const modelsToTry = ['gemini-flash-lite-latest', 'gemini-3.8-flash', 'gemini-3.6-flash'];
+      let lastCallError: any;
+
+      for (const modelName of modelsToTry) {
+        try {
+          response = await ai.models.generateContent({
+            model: modelName,
+            contents: [prompt],
+            config: summaryConfig,
+          });
+          if (response?.text) {
+            break;
+          }
+        } catch (err: any) {
+          lastCallError = err;
+          console.warn(`Overall summary model ${modelName} call failed, trying fallback:`, err?.message || err);
+        }
+      }
+
+      if (!response?.text) {
+        throw lastCallError || new Error("No response generated for overall summary");
+      }
+
+      let jsonStr = response.text ? response.text.trim() : '';
       if (jsonStr.startsWith('```')) {
-        jsonStr = jsonStr.replace(/^```json\n?/, '').replace(/```$/, '');
+        jsonStr = jsonStr.replace(/^```json\n?/, '').replace(/```$/, '').trim();
       }
 
       const parsedResponse = JSON.parse(jsonStr) as GeminiOverallSummaryResponse;
