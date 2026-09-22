@@ -79,7 +79,10 @@ const aiQueue = new AIRequestQueue();
  * Initializes the GoogleGenAI client with the API key from environment variables.
  */
 const getGeminiClient = () => {
-  const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY;
+  const apiKey =
+    process.env.API_KEY ||
+    process.env.GEMINI_API_KEY ||
+    (typeof import.meta !== 'undefined' && import.meta.env?.VITE_GEMINI_API_KEY);
   if (!apiKey) {
     throw new Error('GEMINI_API_KEY is not defined. Please ensure the environment is configured correctly.');
   }
